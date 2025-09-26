@@ -1,8 +1,16 @@
+import mysql.connector
+
 # created Bank class
 
 class Bank:
     def __init__(self):
-        self.users = []
+        self.conn = mysql.connector.connect(
+            host="localhost",
+            user="dckap",
+            password="welcome",  
+            database="bank_management"
+        )
+        self.cursor = self.conn.cursor(dictionary=True)
         self.current_user = None
 
 # user Register
@@ -11,19 +19,16 @@ class Bank:
         password = input("Enter your password: ")
         email = input("Enter your email: ")
 
-        for user in self.users:
-            if user["email"] == email:
-                print("A user with the same email already exists.")
-                return
+        self.cursor.execute("SELECT * FROM users WHERE email = %s", (email,))
+        if self.cursor.fetchone():
+            print("A user with this email already exists.")
+            return
 
-        user = {
-            "name": name,
-            "password": password,
-            "email": email,
-            "balance": 0,
-            "history": []
-        }
-        self.users.append(user)
+        self.cursor.execute(
+            "INSERT INTO users (name, email, password) VALUES (%s, %s, %s)",
+            (name, email, password)
+        )
+        self.conn.commit()
         print("Registration successful!")
 
 # user Login
@@ -32,20 +37,20 @@ class Bank:
         name = input("Enter your name: ")
         password = input("Enter your password: ")
 
-        for user in self.users:
-            if user["name"] == name and user["password"] == password:
-                self.current_user = user
-                print("Login successful!")
-                return
-        print("Invalid credentials.")
+        self.cursor.execute(
+            "SELECT * FROM users WHERE name = %s AND password = %s",
+            (name, password)
+        )
+        user = self.cursor.fetchone()
+        if user:
+            self.current_user = user
+            print("Login successful!")
+        else:
+            print("Invalid credentials.")
 
 # inherite Bank to Account class
 
 class Account(Bank):
-    def __init__(self):
-        super().__init__()
-
-# deposit your amount
 
     def deposit(self):
         if not self.current_user:
@@ -53,13 +58,24 @@ class Account(Bank):
             return
 
         amount = int(input("Enter deposit amount: "))
-        if amount > 0:
-            self.current_user["balance"] += amount
-            msg = f"₹{amount} deposited successfully."
-            self.current_user["history"].append(msg)
-            print(msg)
-        else:
-            print("amount must be positive...negative value not allowed")
+        if amount <= 0:
+            print("Amount must be positive.")
+            return
+
+        new_balance = self.current_user['balance'] + amount
+
+        self.cursor.execute(
+            "UPDATE users SET balance = %s WHERE id = %s",
+            (new_balance, self.current_user['id'])
+        )
+        self.cursor.execute(
+            "INSERT INTO transactions (user_id, type, amount, description) VALUES (%s, %s, %s, %s)",
+            (self.current_user['id'], 'deposit', amount, 'Deposit')
+        )
+        self.conn.commit()
+
+        self.current_user['balance'] = new_balance
+        print(f"₹{amount} deposited successfully.")
 
 # withdraw method
 
@@ -69,14 +85,30 @@ class Account(Bank):
             return
 
         amount = int(input("Enter withdrawal amount: "))
-        if amount > self.current_user["balance"]:
+        if amount <= 0:
+            print("Amount must be positive.")
+            return
+
+        # Check latest balance
+        self.cursor.execute("SELECT balance FROM users WHERE id = %s", (self.current_user['id'],))
+        balance = self.cursor.fetchone()['balance']
+
+        if amount > balance:
             print("Insufficient funds.")
             return
 
-        self.current_user["balance"] -= amount
-        msg = f"₹{amount} withdrawn successfully."
-        self.current_user["history"].append(msg)
-        print(msg)
+        new_balance = balance - amount
+
+        # Update balance and log transaction
+        self.cursor.execute("UPDATE users SET balance = %s WHERE id = %s", (new_balance, self.current_user['id']))
+        self.cursor.execute(
+            "INSERT INTO transactions (user_id, type, amount, description) VALUES (%s, %s, %s, %s)",
+            (self.current_user['id'], 'withdraw', amount, 'Withdrawal')
+        )
+        self.conn.commit()
+
+        self.current_user['balance'] = new_balance
+        print(f"₹{amount} withdrawn successfully.")
 
 # transfer amount your friends or family
 
@@ -88,34 +120,52 @@ class Account(Bank):
         receiver_email = input("Enter receiver's email: ")
         amount = int(input("Enter transfer amount: "))
 
-        if amount > self.current_user["balance"]:
-            print("Insufficient funds.")
-            return
-        if amount < 0:
+        if amount <= 0:
             print("Transfer amount must be positive.")
             return
-        
 
-        receiver = None
-        for user in self.users:
-            if user["email"] == receiver_email:
-                if user["email"] == self.current_user["email"]:
-                    print("You cannot transfer to yourself.")
-                    return
-            receiver = user
-            break
+        # Find receiver
+        self.cursor.execute("SELECT * FROM users WHERE email = %s", (receiver_email,))
+        receiver = self.cursor.fetchone()
 
-        if receiver is None:
+        if not receiver:
             print("Receiver not found.")
             return
 
-        self.current_user["balance"] -= amount
-        receiver["balance"] += amount
+        if receiver['id'] == self.current_user['id']:
+            print("You cannot transfer money to yourself.")
+            return
 
-        self.current_user["history"].append(f"Transferred ₹{amount} to {receiver_email}")
-        receiver["history"].append(f"Received ₹{amount} from {self.current_user['email']}")
+        # Get sender balance
+        self.cursor.execute("SELECT balance FROM users WHERE id = %s", (self.current_user['id'],))
+        sender_balance = self.cursor.fetchone()['balance']
 
-        print("Transfer successful!")
+        if amount > sender_balance:
+            print("Insufficient funds.")
+            return
+
+        new_sender_balance = sender_balance - amount
+        new_receiver_balance = receiver['balance'] + amount
+
+        # Perform the transfer: update balances
+        self.cursor.execute("UPDATE users SET balance = %s WHERE id = %s", (new_sender_balance, self.current_user['id']))
+        self.cursor.execute("UPDATE users SET balance = %s WHERE id = %s", (new_receiver_balance, receiver['id']))
+
+        # Log transactions for both users
+        self.cursor.execute("""
+            INSERT INTO transactions (user_id, type, amount, related_user_id, description)
+            VALUES (%s, %s, %s, %s, %s)
+        """, (self.current_user['id'], 'transfer_sent', amount, receiver['id'], f"Transferred to {receiver_email}"))
+
+        self.cursor.execute("""
+            INSERT INTO transactions (user_id, type, amount, related_user_id, description)
+            VALUES (%s, %s, %s, %s, %s)
+        """, (receiver['id'], 'transfer_received', amount, self.current_user['id'], f"Received from {self.current_user['email']}"))
+
+        self.conn.commit()
+
+        self.current_user['balance'] = new_sender_balance
+        print(f"₹{amount} transferred successfully to {receiver_email}.")
 
 # check your balance
 
@@ -123,8 +173,10 @@ class Account(Bank):
         if not self.current_user:
             print("Please log in first.")
             return
-        
-        print("Hii" ,self.current_user["name"]," your balance is: ₹",self.current_user["balance"])
+
+        self.cursor.execute("SELECT balance FROM users WHERE id = %s", (self.current_user['id'],))
+        balance = self.cursor.fetchone()['balance']
+        print(f"Hello {self.current_user['name']}, your balance is ₹{balance}")
 
 # see your transaction history
 
@@ -132,10 +184,19 @@ class Account(Bank):
         if not self.current_user:
             print("Please log in first.")
             return
-        print("===== Transaction History: =====")
 
-        for history in self.current_user["history"]:
-            print(history)
+        self.cursor.execute("""
+            SELECT type, amount, description, created_at 
+            FROM transactions 
+            WHERE user_id = %s 
+            ORDER BY created_at DESC
+        """, (self.current_user['id'],))
+
+        transactions = self.cursor.fetchall()
+
+        print("===== Transaction History: =====")
+        for txn in transactions:
+            print(f"{txn['created_at']} | {txn['type']} | ₹{txn['amount']} | {txn['description']}")
 
     
 
